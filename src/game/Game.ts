@@ -128,6 +128,8 @@ export class Game {
   private toastText = "";
   private toastT = 0;
   private particles: Particle[] = [];
+  private animTime = 0;
+  private readonly playerAtlas: HTMLImageElement | null;
   private accum = 0;
   private raf = 0;
   private lastFrameT = 0;
@@ -156,6 +158,7 @@ export class Game {
     readonly canvas: HTMLCanvasElement,
     level: BuiltLevel,
     hudEl: HTMLElement,
+    playerAtlas: HTMLImageElement | null = null,
   ) {
     const c = canvas.getContext("2d");
     if (!c) throw new Error("2d context");
@@ -168,6 +171,7 @@ export class Game {
     this.muted = loadBool(STORAGE_MUTE, false);
     this.musicOff = loadBool(STORAGE_MUSIC_OFF, false);
     this.reduceMotion = loadBool(STORAGE_REDUCE_MOTION, false);
+    this.playerAtlas = playerAtlas;
     this.syncHud();
     window.addEventListener("keydown", this.onKey);
   }
@@ -202,6 +206,7 @@ export class Game {
   }
 
   private frame(dt: number): void {
+    this.animTime += dt;
     this.accum += dt;
     let steps = 0;
     while (this.accum >= FIXED_DT && steps < MAX_STEPS) {
@@ -352,9 +357,16 @@ export class Game {
       this.phase === "playing" &&
       this.invincibleMs > 0 &&
       Math.floor(this.invincibleMs / 140) % 2 === 0;
-    if (this.phase !== "title") {
-      drawPlayer(ctx, this.player, biome, flash);
-    }
+    drawPlayer(
+      ctx,
+      this.player,
+      biome,
+      flash,
+      this.playerAtlas,
+      this.animTime,
+      this.phase,
+      this.deathPending,
+    );
 
     this.drawUiOverlay(biome);
     ctx.restore();

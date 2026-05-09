@@ -10,6 +10,12 @@ import {
   PLAYER_W,
 } from "../game/constants";
 import type { PlayerState } from "../game/physics";
+import {
+  ATLAS_FRAME_H,
+  ATLAS_FRAME_W,
+  pickPlayerFrame,
+  type PlayerDrawPhase,
+} from "./playerSprite";
 
 function worldToScreen(worldX: number, scroll: number): number {
   return worldX - scroll;
@@ -180,7 +186,73 @@ export function drawHazards(
   }
 }
 
+export type { PlayerDrawPhase };
+
 export function drawPlayer(
+  ctx: CanvasRenderingContext2D,
+  player: PlayerState,
+  biome: BiomeId,
+  invincibleFlash: boolean,
+  atlas: HTMLImageElement | null,
+  animTime: number,
+  phase: PlayerDrawPhase,
+  deathPending: boolean,
+): void {
+  if (atlas?.complete && atlas.naturalWidth > 0) {
+    drawPlayerSprite(
+      ctx,
+      player,
+      invincibleFlash,
+      atlas,
+      animTime,
+      phase,
+      deathPending,
+    );
+    return;
+  }
+  drawPlayerFallback(ctx, player, biome, invincibleFlash);
+}
+
+function drawPlayerSprite(
+  ctx: CanvasRenderingContext2D,
+  player: PlayerState,
+  invincibleFlash: boolean,
+  atlas: HTMLImageElement,
+  animTime: number,
+  phase: PlayerDrawPhase,
+  deathPending: boolean,
+): void {
+  const slice = pickPlayerFrame(player, animTime, phase, deathPending);
+  const cx = PLAYER_SCREEN_X + PLAYER_W * 0.5;
+  const baseY = player.y + PLAYER_H;
+  const destH = PLAYER_H * 2.05;
+  const destW = (ATLAS_FRAME_W / ATLAS_FRAME_H) * destH;
+  const dx = cx - destW * 0.5;
+  const footNudge = 10;
+  const dy = player.y + PLAYER_H - destH + footNudge;
+
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  if (invincibleFlash) ctx.globalAlpha = 0.5;
+  ctx.translate(cx, baseY);
+  ctx.scale(1, player.squash);
+  ctx.translate(-cx, -baseY);
+  ctx.drawImage(
+    atlas,
+    slice.sx,
+    slice.sy,
+    slice.sw,
+    slice.sh,
+    dx,
+    dy,
+    destW,
+    destH,
+  );
+  ctx.restore();
+  ctx.globalAlpha = 1;
+}
+
+function drawPlayerFallback(
   ctx: CanvasRenderingContext2D,
   player: PlayerState,
   biome: BiomeId,
@@ -200,7 +272,6 @@ export function drawPlayer(
   const w = PLAYER_W;
   const h = PLAYER_H;
 
-  // Roots
   ctx.strokeStyle = "#5d4037";
   ctx.lineWidth = 3;
   ctx.lineCap = "round";
@@ -212,7 +283,6 @@ export function drawPlayer(
     ctx.stroke();
   }
 
-  // Stump body
   ctx.fillStyle = "#6d4c41";
   ctx.strokeStyle = "#3e2723";
   ctx.lineWidth = 2;
@@ -221,7 +291,6 @@ export function drawPlayer(
   ctx.fill();
   ctx.stroke();
 
-  // Leaves / canopy
   ctx.fillStyle = palette.parallaxNear;
   ctx.beginPath();
   ctx.ellipse(x + w * 0.5, y + 16, w * 0.55, 22, 0, 0, Math.PI * 2);
@@ -229,7 +298,6 @@ export function drawPlayer(
   ctx.strokeStyle = "#1b5e20";
   ctx.stroke();
 
-  // Face
   ctx.fillStyle = "#fffde7";
   ctx.beginPath();
   ctx.arc(x + w * 0.35, y + 32, 4, 0, Math.PI * 2);
