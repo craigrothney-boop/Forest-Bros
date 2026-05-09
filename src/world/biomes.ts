@@ -85,6 +85,8 @@ export function biomeAtX(
   segments: { x0: number; x1: number; biome: BiomeId }[],
   worldX: number,
 ): BiomeId {
+  const first = segments[0];
+  if (first && worldX < first.x0) return first.biome;
   for (const s of segments) {
     if (worldX >= s.x0 && worldX < s.x1) return s.biome;
   }

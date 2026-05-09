@@ -2,10 +2,18 @@ import {
   BASE_SPEED,
   CANVAS_H,
   CANVAS_W,
+  DEATH_FREEZE_S,
+  GROUND_Y,
+  INVINCIBILITY_MS,
+  MAX_SPEED_MUL,
   PLAYER_SCREEN_X,
   PLAYER_W,
+  RUNWAY_END,
+  SEGMENT_RAMP_DIST,
+  SEGMENT_RAMP_MIN_FRAC,
   STORAGE_BEST,
   STORAGE_MUTE,
+  STORAGE_MUSIC_OFF,
   STORAGE_REDUCE_MOTION,
 } from "./constants";
 import { InputBuffer } from "./input";
@@ -20,6 +28,13 @@ import {
   drawPlayer,
   drawSolids,
 } from "../render/scene";
+import {
+  drawParticles,
+  spawnDustBurst,
+  updateParticles,
+  type Particle,
+} from "../render/particles";
+import { BIOME_TOAST } from "./story";
 import * as audio from "./audio";
 
 const FIXED_DT = 1 / 60;
@@ -27,14 +42,33 @@ const MAX_STEPS = 6;
 
 export type Phase = "title" | "playing" | "gameover" | "won";
 
-function speedMulAt(
-  worldX: number,
+function effectiveSpeedMul(
+  footX: number,
   segments: BuiltLevel["segments"],
 ): number {
-  for (const s of segments) {
-    if (worldX >= s.x0 && worldX < s.x1) return s.speedMul;
+  const first = segments[0];
+  if (first && footX < first.x0) {
+    const rampLen = Math.max(160, first.x0 - RUNWAY_END * 0.5);
+    const u = Math.min(1, Math.max(0, (footX - RUNWAY_END * 0.2) / rampLen));
+    const smooth = u * u * (3 - 2 * u);
+    const ramp =
+      SEGMENT_RAMP_MIN_FRAC + (1 - SEGMENT_RAMP_MIN_FRAC) * smooth;
+    return Math.min(MAX_SPEED_MUL, first.speedMul * ramp);
   }
-  return segments[segments.length - 1]?.speedMul ?? 1;
+  for (const s of segments) {
+    if (footX >= s.x0 && footX < s.x1) {
+      const u = Math.min(
+        1,
+        Math.max(0, (footX - s.x0) / SEGMENT_RAMP_DIST),
+      );
+      const smooth = u * u * (3 - 2 * u);
+      const ramp =
+        SEGMENT_RAMP_MIN_FRAC + (1 - SEGMENT_RAMP_MIN_FRAC) * smooth;
+      return Math.min(MAX_SPEED_MUL, s.speedMul * ramp);
+    }
+  }
+  const last = segments[segments.length - 1]?.speedMul ?? 1;
+  return Math.min(MAX_SPEED_MUL, last);
 }
 
 function loadBool(key: string, defaultVal: boolean): boolean {
@@ -85,7 +119,15 @@ export class Game {
   runMaxScroll = 0;
   shake = 0;
   muted: boolean;
+  musicOff: boolean;
   reduceMotion: boolean;
+  invincibleMs = 0;
+  private deathPending = false;
+  private deathTimer = 0;
+  private prevBiome: BiomeId | null = null;
+  private toastText = "";
+  private toastT = 0;
+  private particles: Particle[] = [];
   private accum = 0;
   private raf = 0;
   private lastFrameT = 0;
@@ -94,6 +136,13 @@ export class Game {
     if (e.key === "m" || e.key === "M") {
       this.muted = !this.muted;
       saveBool(STORAGE_MUTE, this.muted);
+      audio.applyMusicVolume();
+      this.syncHud();
+    }
+    if (e.key === "b" || e.key === "B") {
+      this.musicOff = !this.musicOff;
+      saveBool(STORAGE_MUSIC_OFF, this.musicOff);
+      audio.applyMusicVolume();
       this.syncHud();
     }
     if (e.key === "r" || e.key === "R") {
@@ -117,6 +166,7 @@ export class Game {
     this.hudEl = hudEl;
     this.runBest = loadInt(STORAGE_BEST, 0);
     this.muted = loadBool(STORAGE_MUTE, false);
+    this.musicOff = loadBool(STORAGE_MUSIC_OFF, false);
     this.reduceMotion = loadBool(STORAGE_REDUCE_MOTION, false);
     this.syncHud();
     window.addEventListener("keydown", this.onKey);
@@ -137,6 +187,7 @@ export class Game {
     cancelAnimationFrame(this.raf);
     window.removeEventListener("keydown", this.onKey);
     this.input.dispose();
+    audio.stopBackgroundMusic();
   }
 
   private syncHud(): void {
@@ -145,7 +196,7 @@ export class Game {
       `<strong>Forest Bros</strong> — a little tree looking for a new home.`,
     );
     lines.push(
-      `Best run: <strong>${this.runBest}m</strong> · <kbd>Space</kbd> / tap to jump · <kbd>M</kbd> mute · <kbd>R</kbd> reduce motion`,
+      `Best run: <strong>${this.runBest}m</strong> · <kbd>Space</kbd> / tap jump · <kbd>M</kbd> mute all · <kbd>B</kbd> music · <kbd>R</kbd> reduce motion`,
     );
     this.hudEl.innerHTML = lines.join("<br/>");
   }
@@ -160,7 +211,7 @@ export class Game {
     }
     if (steps === MAX_STEPS) this.accum = 0;
 
-    if (this.phase === "playing") {
+    if (this.phase === "playing" && !this.deathPending) {
       this.shake *= Math.pow(0.9, dt * 60);
     } else {
       this.shake = 0;
@@ -180,30 +231,71 @@ export class Game {
     if (this.phase === "gameover" || this.phase === "won") {
       if (this.input.consumeJump()) {
         void audio.resumeAudio();
-        if (this.phase === "won") this.phase = "title";
-        else this.beginRun();
+        if (this.phase === "won") {
+          this.phase = "title";
+          audio.stopBackgroundMusic();
+        } else this.beginRun();
       }
       return;
     }
 
+    // playing
+    const wxHud = this.scroll + CANVAS_W * 0.4;
+    const biomeNow = biomeAtX(this.level.segments, wxHud);
+    updateParticles(this.particles, dt, biomeNow);
+
+    if (this.toastT > 0) this.toastT -= dt;
+
+    if (this.deathPending) {
+      this.deathTimer -= dt;
+      if (this.deathTimer <= 0) {
+        this.phase = "gameover";
+        this.deathPending = false;
+        this.particles = [];
+        if (this.runMaxScroll > this.runBest) {
+          this.runBest = this.runMaxScroll;
+          saveInt(STORAGE_BEST, this.runBest);
+        }
+        this.syncHud();
+      }
+      return;
+    }
+
+    if (this.invincibleMs > 0) this.invincibleMs -= dt * 1000;
+
     const footX = this.scroll + PLAYER_SCREEN_X + PLAYER_W * 0.5;
-    const mul = speedMulAt(footX, this.level.segments);
+    const mul = effectiveSpeedMul(footX, this.level.segments);
     this.scroll += BASE_SPEED * mul * dt;
     this.runMaxScroll = Math.max(this.runMaxScroll, Math.floor(this.scroll));
 
     const jumped = this.input.consumeJump();
-    const result = stepPlayer(dt, this.scroll, this.player, this.level, jumped);
+    const inv = this.invincibleMs > 0;
+    const result = stepPlayer(
+      dt,
+      this.scroll,
+      this.player,
+      this.level,
+      jumped,
+      inv,
+    );
     if (result.didJump && !this.muted) audio.playJumpSound();
 
+    if (result.landed) {
+      const cx = PLAYER_SCREEN_X + PLAYER_W * 0.5;
+      this.particles.push(...spawnDustBurst(cx, GROUND_Y - 4));
+    }
+
+    if (biomeNow !== this.prevBiome) {
+      this.prevBiome = biomeNow;
+      this.toastText = BIOME_TOAST[biomeNow];
+      this.toastT = 4.2;
+    }
+
     if (result.status === "dead") {
-      this.phase = "gameover";
+      this.deathPending = true;
+      this.deathTimer = DEATH_FREEZE_S;
       this.shake = this.reduceMotion ? 0 : 10;
       if (!this.muted) audio.playFailSound();
-      if (this.runMaxScroll > this.runBest) {
-        this.runBest = this.runMaxScroll;
-        saveInt(STORAGE_BEST, this.runBest);
-      }
-      this.syncHud();
       return;
     }
 
@@ -224,6 +316,15 @@ export class Game {
     this.scroll = 0;
     this.player = createPlayer();
     this.runMaxScroll = 0;
+    this.invincibleMs = INVINCIBILITY_MS;
+    this.deathPending = false;
+    this.deathTimer = 0;
+    this.prevBiome = biomeAtX(this.level.segments, 0);
+    this.toastText = BIOME_TOAST[this.prevBiome];
+    this.toastT = 3.2;
+    this.particles = [];
+    audio.ensureBackgroundMusic();
+    audio.applyMusicVolume();
   }
 
   private render(): void {
@@ -244,7 +345,16 @@ export class Game {
     drawSolids(ctx, this.scroll, this.level, biome);
     drawHazards(ctx, this.scroll, this.level, biome);
     drawFinishRibbon(ctx, this.scroll, this.level.totalLength - 40);
-    drawPlayer(ctx, this.player, biome);
+    if (this.phase !== "title") {
+      drawParticles(ctx, this.particles);
+    }
+    const flash =
+      this.phase === "playing" &&
+      this.invincibleMs > 0 &&
+      Math.floor(this.invincibleMs / 140) % 2 === 0;
+    if (this.phase !== "title") {
+      drawPlayer(ctx, this.player, biome, flash);
+    }
 
     this.drawUiOverlay(biome);
     ctx.restore();
@@ -278,13 +388,29 @@ export class Game {
       );
     }
 
-    if (this.phase === "playing" && this.scroll < 280) {
+    if (this.phase === "playing" && this.scroll < 280 && !this.deathPending) {
       ctx.fillStyle = "rgba(0,0,0,0.35)";
       ctx.fillRect(0, CANVAS_H - 72, CANVAS_W, 72);
       ctx.fillStyle = "#e8f5e9";
       ctx.font = "bold 22px system-ui,sans-serif";
       ctx.textAlign = "center";
       ctx.fillText("Tap / Space to jump", CANVAS_W / 2, CANVAS_H - 32);
+    }
+
+    if (
+      this.phase === "playing" &&
+      this.toastT > 0 &&
+      this.toastText &&
+      !this.deathPending
+    ) {
+      ctx.textAlign = "center";
+      ctx.font = "italic 17px system-ui,sans-serif";
+      ctx.fillStyle = `rgba(255,255,255,${Math.min(0.95, this.toastT * 0.35)})`;
+      ctx.strokeStyle = "rgba(0,0,0,0.35)";
+      ctx.lineWidth = 3;
+      const ty = CANVAS_H * 0.14;
+      ctx.strokeText(this.toastText, CANVAS_W / 2, ty);
+      ctx.fillText(this.toastText, CANVAS_W / 2, ty);
     }
 
     if (

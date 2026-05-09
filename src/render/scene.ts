@@ -184,11 +184,13 @@ export function drawPlayer(
   ctx: CanvasRenderingContext2D,
   player: PlayerState,
   biome: BiomeId,
+  invincibleFlash: boolean,
 ): void {
   const palette = BIOMES[biome];
   const cx = PLAYER_SCREEN_X + PLAYER_W * 0.5;
   const baseY = player.y + PLAYER_H;
   ctx.save();
+  if (invincibleFlash) ctx.globalAlpha = 0.5;
   ctx.translate(cx, baseY);
   ctx.scale(1, player.squash);
   ctx.translate(-cx, -baseY);
@@ -240,6 +242,7 @@ export function drawPlayer(
   ctx.fill();
 
   ctx.restore();
+  ctx.globalAlpha = 1;
 }
 
 export function drawFinishRibbon(

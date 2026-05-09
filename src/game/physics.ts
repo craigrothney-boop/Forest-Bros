@@ -19,6 +19,7 @@ export interface PlayerState {
   coyoteMs: number;
   jumpBufferMs: number;
   squash: number;
+  landPunch: number;
 }
 
 export function createPlayer(): PlayerState {
@@ -29,6 +30,7 @@ export function createPlayer(): PlayerState {
     coyoteMs: 0,
     jumpBufferMs: 0,
     squash: 1,
+    landPunch: 0,
   };
 }
 
@@ -58,7 +60,8 @@ export function stepPlayer(
   player: PlayerState,
   level: BuiltLevel,
   jumpPressed: boolean,
-): { status: "alive" | "dead"; didJump: boolean } {
+  invincible: boolean,
+): { status: "alive" | "dead"; didJump: boolean; landed: boolean } {
   let didJump = false;
   if (jumpPressed) player.jumpBufferMs = JUMP_BUFFER_MS;
   else player.jumpBufferMs = Math.max(0, player.jumpBufferMs - dt * 1000);
@@ -75,12 +78,15 @@ export function stepPlayer(
     didJump = true;
   }
 
+  const groundedBeforePhysics = player.grounded;
   const prevY = player.y;
   player.vy += GRAVITY * dt;
   player.y += player.vy * dt;
 
-  // Squash/stretch visual helper
-  const targetSquash = clamp(1 + player.vy * 0.00035, 0.88, 1.12);
+  player.landPunch *= Math.exp(-dt * 16);
+  // Squash/stretch visual helper (+ landing punch)
+  const targetSquash =
+    clamp(1 + player.vy * 0.00032, 0.88, 1.12) * (1 + 0.2 * player.landPunch);
   player.squash += (targetSquash - player.squash) * Math.min(1, dt * 12);
 
   const footX = footCenterWorldX(scroll);
@@ -101,7 +107,7 @@ export function stepPlayer(
       player.y = s.y + s.h;
       player.vy = 0;
     } else {
-      return { status: "dead", didJump };
+      if (!invincible) return { status: "dead", didJump, landed: false };
     }
   }
 
@@ -121,15 +127,25 @@ export function stepPlayer(
 
   player.grounded = groundedHere;
 
-  // Hazards
-  const pwFinal = playerWorldRect(scroll, player);
-  for (const h of level.hazards) {
-    if (rectsOverlap(pwFinal, h)) return { status: "dead", didJump };
+  let landed = false;
+  if (groundedHere && !groundedBeforePhysics) {
+    player.landPunch = 1;
+    landed = true;
   }
 
-  if (player.y > DEATH_FALL_Y) return { status: "dead", didJump };
+  // Hazards
+  const pwFinal = playerWorldRect(scroll, player);
+  if (!invincible) {
+    for (const h of level.hazards) {
+      if (rectsOverlap(pwFinal, h))
+        return { status: "dead", didJump, landed: false };
+    }
+  }
 
-  return { status: "alive", didJump };
+  if (player.y > DEATH_FALL_Y)
+    return { status: "dead", didJump, landed: false };
+
+  return { status: "alive", didJump, landed };
 }
 
 function clamp(n: number, a: number, b: number): number {
